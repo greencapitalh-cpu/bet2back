@@ -43,6 +43,7 @@ Thumbs.db
 
 # Logs
 *.log
+.tmp-db-client/
 
 # Database
 *.db

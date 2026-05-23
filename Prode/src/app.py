@@ -9,6 +9,7 @@ from flask_cors import CORS
 from infrastructure.entrypoints.users import users
 from infrastructure.entrypoints.partidos import partidos
 from infrastructure.entrypoints.ranking.ranking import get_ranking
+from infrastructure.entrypoints.mvp_api import mvp_api
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -16,6 +17,11 @@ CORS(app, supports_credentials=True)
 users_bp = Blueprint('users', __name__, url_prefix='/users')
 partidos_bp = Blueprint('partidos', __name__, url_prefix='/partidos')
 ranking_bp = Blueprint('ranking', __name__, url_prefix='/ranking')
+
+
+@app.route('/healthz', methods=['GET'])
+def healthcheck():
+    return {'status': 'ok'}, 200
 
 
 @users_bp.route('/register', methods=['POST'])
@@ -86,6 +92,7 @@ def get_ranking_endpoint():
 app.register_blueprint(users_bp)
 app.register_blueprint(partidos_bp)
 app.register_blueprint(ranking_bp)
+app.register_blueprint(mvp_api)
 
 
 if __name__ == '__main__':
