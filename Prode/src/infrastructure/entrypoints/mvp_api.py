@@ -3,6 +3,7 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request
 
 from infrastructure.db_conn.mysql_config import get_connection
+from infrastructure.entrypoints.full_fixture import FULL_FIXTURE
 
 
 mvp_api = Blueprint("mvp_api", __name__, url_prefix="/api")
@@ -290,6 +291,27 @@ def ensure_schema():
                 WHERE kickoff_utc IS NULL OR match_timezone IS NULL
                 """
             )
+            cursor.executemany(
+                """
+                INSERT INTO gp_matches
+                (id, group_name, phase, match_date, kickoff_utc, match_timezone, city, venue,
+                 home_team, away_team, home_code, away_code, home_score, away_score, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NULL,NULL,'scheduled')
+                ON DUPLICATE KEY UPDATE
+                group_name=VALUES(group_name),
+                phase=VALUES(phase),
+                match_date=VALUES(match_date),
+                kickoff_utc=VALUES(kickoff_utc),
+                match_timezone=VALUES(match_timezone),
+                city=VALUES(city),
+                venue=VALUES(venue),
+                home_team=VALUES(home_team),
+                away_team=VALUES(away_team),
+                home_code=VALUES(home_code),
+                away_code=VALUES(away_code)
+                """,
+                FULL_FIXTURE,
+            )
             cursor.execute("SELECT COUNT(*) AS total FROM gp_merchants")
             if cursor.fetchone()["total"] == 0:
                 cursor.execute(
@@ -355,6 +377,101 @@ def qualifies(prediction, match, reward):
             == match["first_half_home_score"] + match["first_half_away_score"]
         )
     return False
+
+
+def group_letter(group_name):
+    if not group_name:
+        return None
+    return str(group_name).strip().split()[-1].upper()
+
+
+def build_standings(connection):
+    standings = {}
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT *
+            FROM gp_matches
+            WHERE phase='Grupos'
+            ORDER BY group_name, match_date, id
+            """
+        )
+        matches = cursor.fetchall()
+    for match in matches:
+        letter = group_letter(match.get("group_name"))
+        if not letter:
+            continue
+        table = standings.setdefault(letter, {})
+        for side_name, code_key, score_key, against_key in [
+            ("home_team", "home_code", "home_score", "away_score"),
+            ("away_team", "away_code", "away_score", "home_score"),
+        ]:
+            code = match.get(code_key)
+            table.setdefault(
+                code,
+                {
+                    "team": match.get(side_name),
+                    "code": code,
+                    "played": 0,
+                    "points": 0,
+                    "gd": 0,
+                    "gf": 0,
+                },
+            )
+            if match.get("status") != "final" or match.get(score_key) is None or match.get(against_key) is None:
+                continue
+            item = table[code]
+            item["played"] += 1
+            item["gf"] += match[score_key]
+            item["gd"] += match[score_key] - match[against_key]
+            if match[score_key] > match[against_key]:
+                item["points"] += 3
+            elif match[score_key] == match[against_key]:
+                item["points"] += 1
+    resolved = {}
+    for letter, table in standings.items():
+        ordered = sorted(table.values(), key=lambda item: (item["points"], item["gd"], item["gf"]), reverse=True)
+        if len(ordered) >= 2 and all(item["played"] >= 3 for item in ordered[:4]):
+            resolved[f"1{letter}"] = ordered[0]
+            resolved[f"2{letter}"] = ordered[1]
+    return standings, resolved
+
+
+def resolve_knockout_slots(connection):
+    _standings, resolved = build_standings(connection)
+    if not resolved:
+        return
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, home_team, away_team, home_code, away_code
+            FROM gp_matches
+            WHERE phase <> 'Grupos'
+            """
+        )
+        matches = cursor.fetchall()
+        for match in matches:
+            home = resolved.get(match["home_code"]) or resolved.get(match["home_team"])
+            away = resolved.get(match["away_code"]) or resolved.get(match["away_team"])
+            if not home and not away:
+                continue
+            cursor.execute(
+                """
+                UPDATE gp_matches
+                SET home_team=COALESCE(%s, home_team),
+                    home_code=COALESCE(%s, home_code),
+                    away_team=COALESCE(%s, away_team),
+                    away_code=COALESCE(%s, away_code)
+                WHERE id=%s
+                """,
+                (
+                    home["team"] if home else None,
+                    home["code"] if home else None,
+                    away["team"] if away else None,
+                    away["code"] if away else None,
+                    match["id"],
+                ),
+            )
 
 
 def issue_vouchers(connection, match_id=None, prediction_id=None):
@@ -434,6 +551,22 @@ def update_match_result(match_id):
                 ),
             )
             issue_vouchers(connection, match_id=match_id)
+            resolve_knockout_slots(connection)
+        connection.commit()
+    return jsonify({"status": "ok"})
+
+
+@mvp_api.route("/standings", methods=["GET"])
+def standings():
+    with get_connection() as connection:
+        raw, resolved = build_standings(connection)
+    return jsonify({"groups": raw, "resolved_slots": resolved})
+
+
+@mvp_api.route("/knockout/resolve", methods=["POST"])
+def resolve_knockout():
+    with get_connection() as connection:
+        resolve_knockout_slots(connection)
         connection.commit()
     return jsonify({"status": "ok"})
 
