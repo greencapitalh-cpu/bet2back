@@ -152,12 +152,124 @@ def ensure_schema():
                     INSERT INTO gp_matches
                     (group_name, phase, match_date, kickoff_utc, match_timezone, city, venue, home_team, away_team, home_code, away_code, home_score, away_score, status)
                     VALUES
-                    ('Grupo A', 'Grupos', '2026-06-11 20:00:00', '2026-06-12T01:00:00Z', 'America/Mexico_City', 'Ciudad de Mexico', 'Azteca', 'Mexico', 'South Africa', 'MEX', 'RSA', 2, 1, 'final'),
-                    ('Grupo A', 'Grupos', '2026-06-11 23:00:00', '2026-06-12T04:00:00Z', 'America/Mexico_City', 'Guadalajara', 'Akron', 'South Korea', 'Czechia', 'KOR', 'CZE', NULL, NULL, 'scheduled'),
-                    ('Grupo B', 'Grupos', '2026-06-12 20:00:00', '2026-06-13T00:00:00Z', 'America/Toronto', 'Toronto', 'BMO Field', 'Canada', 'Switzerland', 'CAN', 'SUI', NULL, NULL, 'scheduled'),
-                    ('Grupo C', 'Grupos', '2026-06-13 21:00:00', '2026-06-14T01:00:00Z', 'America/New_York', 'Miami', 'Hard Rock', 'Brazil', 'Morocco', 'BRA', 'MAR', 1, 1, 'final')
+                    ('Grupo A', 'Grupos', '2026-06-11 13:00:00', '2026-06-11T19:00:00Z', 'America/Mexico_City', 'Mexico City', 'Mexico City Stadium', 'Mexico', 'South Africa', 'MEX', 'RSA', NULL, NULL, 'scheduled'),
+                    ('Grupo A', 'Grupos', '2026-06-11 20:00:00', '2026-06-12T02:00:00Z', 'America/Mexico_City', 'Guadalajara', 'Guadalajara Stadium', 'Korea Republic', 'Czechia', 'KOR', 'CZE', NULL, NULL, 'scheduled'),
+                    ('Grupo B', 'Grupos', '2026-06-12 15:00:00', '2026-06-12T19:00:00Z', 'America/Toronto', 'Toronto', 'Toronto Stadium', 'Canada', 'Bosnia & Herzegovina', 'CAN', 'BIH', NULL, NULL, 'scheduled'),
+                    ('Grupo D', 'Grupos', '2026-06-12 18:00:00', '2026-06-13T01:00:00Z', 'America/Los_Angeles', 'Los Angeles', 'Los Angeles Stadium', 'United States', 'Paraguay', 'USA', 'PAR', NULL, NULL, 'scheduled'),
+                    ('Grupo C', 'Grupos', '2026-06-13 18:00:00', '2026-06-13T22:00:00Z', 'America/New_York', 'New York New Jersey', 'New York New Jersey Stadium', 'Brazil', 'Morocco', 'BRA', 'MAR', NULL, NULL, 'scheduled'),
+                    ('Grupo J', 'Grupos', '2026-06-16 21:00:00', '2026-06-17T01:00:00Z', 'America/New_York', 'Miami', 'Miami Stadium', 'Argentina', 'Algeria', 'ARG', 'ALG', NULL, NULL, 'scheduled')
                     """
                 )
+            cursor.execute(
+                """
+                UPDATE gp_matches
+                SET group_name = CASE id
+                    WHEN 1 THEN 'Grupo A'
+                    WHEN 2 THEN 'Grupo A'
+                    WHEN 3 THEN 'Grupo B'
+                    WHEN 4 THEN 'Grupo D'
+                    WHEN 5 THEN 'Grupo C'
+                    WHEN 6 THEN 'Grupo J'
+                    ELSE group_name
+                END,
+                match_date = CASE id
+                    WHEN 1 THEN '2026-06-11 13:00:00'
+                    WHEN 2 THEN '2026-06-11 20:00:00'
+                    WHEN 3 THEN '2026-06-12 15:00:00'
+                    WHEN 4 THEN '2026-06-12 18:00:00'
+                    WHEN 5 THEN '2026-06-13 18:00:00'
+                    WHEN 6 THEN '2026-06-16 21:00:00'
+                    ELSE match_date
+                END,
+                kickoff_utc = CASE id
+                    WHEN 1 THEN '2026-06-11T19:00:00Z'
+                    WHEN 2 THEN '2026-06-12T02:00:00Z'
+                    WHEN 3 THEN '2026-06-12T19:00:00Z'
+                    WHEN 4 THEN '2026-06-13T01:00:00Z'
+                    WHEN 5 THEN '2026-06-13T22:00:00Z'
+                    WHEN 6 THEN '2026-06-17T01:00:00Z'
+                    ELSE kickoff_utc
+                END,
+                match_timezone = CASE id
+                    WHEN 1 THEN 'America/Mexico_City'
+                    WHEN 2 THEN 'America/Mexico_City'
+                    WHEN 3 THEN 'America/Toronto'
+                    WHEN 4 THEN 'America/Los_Angeles'
+                    WHEN 5 THEN 'America/New_York'
+                    WHEN 6 THEN 'America/New_York'
+                    ELSE COALESCE(match_timezone, 'UTC')
+                END,
+                city = CASE id
+                    WHEN 1 THEN 'Mexico City'
+                    WHEN 2 THEN 'Guadalajara'
+                    WHEN 3 THEN 'Toronto'
+                    WHEN 4 THEN 'Los Angeles'
+                    WHEN 5 THEN 'New York New Jersey'
+                    WHEN 6 THEN 'Miami'
+                    ELSE city
+                END,
+                venue = CASE id
+                    WHEN 1 THEN 'Mexico City Stadium'
+                    WHEN 2 THEN 'Guadalajara Stadium'
+                    WHEN 3 THEN 'Toronto Stadium'
+                    WHEN 4 THEN 'Los Angeles Stadium'
+                    WHEN 5 THEN 'New York New Jersey Stadium'
+                    WHEN 6 THEN 'Miami Stadium'
+                    ELSE venue
+                END,
+                home_team = CASE id
+                    WHEN 1 THEN 'Mexico'
+                    WHEN 2 THEN 'Korea Republic'
+                    WHEN 3 THEN 'Canada'
+                    WHEN 4 THEN 'United States'
+                    WHEN 5 THEN 'Brazil'
+                    WHEN 6 THEN 'Argentina'
+                    ELSE home_team
+                END,
+                away_team = CASE id
+                    WHEN 1 THEN 'South Africa'
+                    WHEN 2 THEN 'Czechia'
+                    WHEN 3 THEN 'Bosnia & Herzegovina'
+                    WHEN 4 THEN 'Paraguay'
+                    WHEN 5 THEN 'Morocco'
+                    WHEN 6 THEN 'Algeria'
+                    ELSE away_team
+                END,
+                home_code = CASE id
+                    WHEN 1 THEN 'MEX'
+                    WHEN 2 THEN 'KOR'
+                    WHEN 3 THEN 'CAN'
+                    WHEN 4 THEN 'USA'
+                    WHEN 5 THEN 'BRA'
+                    WHEN 6 THEN 'ARG'
+                    ELSE home_code
+                END,
+                away_code = CASE id
+                    WHEN 1 THEN 'RSA'
+                    WHEN 2 THEN 'CZE'
+                    WHEN 3 THEN 'BIH'
+                    WHEN 4 THEN 'PAR'
+                    WHEN 5 THEN 'MAR'
+                    WHEN 6 THEN 'ALG'
+                    ELSE away_code
+                END,
+                home_score = NULL,
+                away_score = NULL,
+                first_half_home_score = NULL,
+                first_half_away_score = NULL,
+                status = 'scheduled'
+                WHERE id BETWEEN 1 AND 6
+                """
+            )
+            cursor.execute(
+                """
+                INSERT IGNORE INTO gp_matches
+                (id, group_name, phase, match_date, kickoff_utc, match_timezone, city, venue, home_team, away_team, home_code, away_code, status)
+                VALUES
+                (5, 'Grupo C', 'Grupos', '2026-06-13 18:00:00', '2026-06-13T22:00:00Z', 'America/New_York', 'New York New Jersey', 'New York New Jersey Stadium', 'Brazil', 'Morocco', 'BRA', 'MAR', 'scheduled'),
+                (6, 'Grupo J', 'Grupos', '2026-06-16 21:00:00', '2026-06-17T01:00:00Z', 'America/New_York', 'Miami', 'Miami Stadium', 'Argentina', 'Algeria', 'ARG', 'ALG', 'scheduled')
+                """
+            )
             cursor.execute(
                 """
                 UPDATE gp_matches
