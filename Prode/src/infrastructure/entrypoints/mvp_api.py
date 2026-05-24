@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import os
 import uuid
@@ -114,6 +114,21 @@ def find_or_create_oauth_fan(email, name):
                 cursor.execute("UPDATE gp_accounts SET last_login_at=NOW() WHERE id=%s", (account["id"],))
         connection.commit()
     return account
+
+
+def kickoff_has_started(match):
+    if not match:
+        return True
+    if match.get("status") == "final" or match.get("home_score") is not None or match.get("away_score") is not None:
+        return True
+    raw = match.get("kickoff_utc")
+    if not raw:
+        return False
+    try:
+        kickoff = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        return False
+    return kickoff <= datetime.now(timezone.utc)
 
 
 def ensure_schema():
@@ -1083,6 +1098,10 @@ def create_prediction():
     payload = request.get_json(force=True) or {}
     with get_connection() as connection:
         with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM gp_matches WHERE id=%s", (payload["match_id"],))
+            match = cursor.fetchone()
+            if kickoff_has_started(match):
+                return jsonify({"error": "predictions are closed for this match"}), 409
             cursor.execute(
                 """
                 INSERT INTO gp_predictions
