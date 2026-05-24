@@ -1,11 +1,11 @@
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, send_file
 
 from infrastructure.db_conn.mysql_config import get_connection
 from infrastructure.db_conn.mongo_config import mirror_document
 from infrastructure.entrypoints.full_fixture import FULL_FIXTURE
-from infrastructure.storage.r2_storage import upload_image
+from infrastructure.storage.r2_storage import read_image, upload_image
 
 
 mvp_api = Blueprint("mvp_api", __name__, url_prefix="/api")
@@ -713,8 +713,18 @@ def upload_promotion_image():
         result = upload_image(image, folder=folder)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    if result.get("storage") == "r2" and result.get("key"):
+        result["url"] = f"{request.url_root.rstrip('/')}/api/uploads/files/{result['key']}"
     mirror_safe("uploads", result, ["key"])
     return jsonify(result), 201
+
+
+@mvp_api.route("/uploads/files/<path:key>", methods=["GET"])
+def uploaded_file(key):
+    stored = read_image(key)
+    if not stored:
+        return jsonify({"error": "file not found"}), 404
+    return send_file(stored["body"], mimetype=stored["content_type"])
 
 
 @mvp_api.route("/merchants", methods=["GET", "POST"])

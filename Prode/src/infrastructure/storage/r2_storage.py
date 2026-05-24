@@ -2,6 +2,7 @@ import base64
 import os
 import uuid
 from datetime import datetime
+from io import BytesIO
 
 try:
     import boto3
@@ -65,3 +66,21 @@ def upload_image(file_storage, folder="promotions"):
     public_base = (os.getenv("R2_PUBLIC_BASE_URL") or "").rstrip("/")
     url = f"{public_base}/{key}" if public_base else f"{os.getenv('R2_ENDPOINT_URL').rstrip('/')}/{bucket}/{key}"
     return {"url": url, "key": key, "storage": "r2"}
+
+
+def read_image(key):
+    if not _r2_configured():
+        return None
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=os.getenv("R2_ENDPOINT_URL"),
+        aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY"),
+        region_name=os.getenv("R2_REGION", "auto"),
+    )
+    response = client.get_object(Bucket=os.getenv("R2_BUCKET_NAME"), Key=key)
+    return {
+        "body": BytesIO(response["Body"].read()),
+        "content_type": response.get("ContentType") or "application/octet-stream",
+    }
