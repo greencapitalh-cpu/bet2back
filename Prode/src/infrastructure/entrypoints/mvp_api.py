@@ -3,7 +3,9 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request
 
 from infrastructure.db_conn.mysql_config import get_connection
+from infrastructure.db_conn.mongo_config import mirror_document
 from infrastructure.entrypoints.full_fixture import FULL_FIXTURE
+from infrastructure.storage.r2_storage import upload_image
 
 
 mvp_api = Blueprint("mvp_api", __name__, url_prefix="/api")
@@ -21,6 +23,13 @@ def one_to_json(row):
     if not row:
         return None
     return rows_to_json([row])[0]
+
+
+def mirror_safe(collection, document, key_fields=None):
+    try:
+        mirror_document(collection, document, key_fields)
+    except Exception:
+        pass
 
 
 def ensure_schema():
@@ -514,6 +523,23 @@ def issue_vouchers(connection, match_id=None, prediction_id=None):
                     """,
                     (code, prediction["fan_id"], prediction["match_id"], prediction["id"], reward["merchant_id"], reward["id"]),
                 )
+                if cursor.rowcount:
+                    mirror_safe(
+                        "vouchers",
+                        {
+                            "code": code,
+                            "fan_id": prediction["fan_id"],
+                            "fan_handle": prediction["handle"],
+                            "match_id": prediction["match_id"],
+                            "prediction_id": prediction["id"],
+                            "merchant_id": reward["merchant_id"],
+                            "reward_id": reward["id"],
+                            "reward_title": reward.get("title"),
+                            "reward_rule": reward.get("rule"),
+                            "status": "valid",
+                        },
+                        ["code"],
+                    )
 
 
 @mvp_api.before_app_request
@@ -677,6 +703,20 @@ def fan_vouchers(fan_id):
             return jsonify(rows_to_json(cursor.fetchall()))
 
 
+@mvp_api.route("/uploads/images", methods=["POST"])
+def upload_promotion_image():
+    image = request.files.get("image")
+    if not image:
+        return jsonify({"error": "image file is required"}), 400
+    folder = request.form.get("folder") or "promotions"
+    try:
+        result = upload_image(image, folder=folder)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    mirror_safe("uploads", result, ["key"])
+    return jsonify(result), 201
+
+
 @mvp_api.route("/merchants", methods=["GET", "POST"])
 def merchants():
     if request.method == "POST":
@@ -691,6 +731,7 @@ def merchants():
                 cursor.execute("SELECT * FROM gp_merchants WHERE id=%s", (merchant_id,))
                 merchant = cursor.fetchone()
             connection.commit()
+        mirror_safe("merchants", one_to_json(merchant), ["id"])
         return jsonify(one_to_json(merchant)), 201
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -720,7 +761,19 @@ def merchant_rewards():
                         payload.get("image_url"),
                     ),
                 )
+                reward_id = cursor.lastrowid
+                cursor.execute(
+                    """
+                    SELECT r.*, m.name AS merchant_name, m.zone, m.link
+                    FROM gp_merchant_rewards r
+                    JOIN gp_merchants m ON m.id = r.merchant_id
+                    WHERE r.id=%s
+                    """,
+                    (reward_id,),
+                )
+                reward = cursor.fetchone()
             connection.commit()
+        mirror_safe("merchant_rewards", one_to_json(reward), ["id"])
         return jsonify({"status": "ok"}), 201
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -756,7 +809,19 @@ def merchant_promotions():
                         payload.get("expires_at"),
                     ),
                 )
+                promotion_id = cursor.lastrowid
+                cursor.execute(
+                    """
+                    SELECT p.*, m.name AS merchant_name, m.zone
+                    FROM gp_merchant_promotions p
+                    JOIN gp_merchants m ON m.id = p.merchant_id
+                    WHERE p.id=%s
+                    """,
+                    (promotion_id,),
+                )
+                promotion = cursor.fetchone()
             connection.commit()
+        mirror_safe("merchant_promotions", one_to_json(promotion), ["id"])
         return jsonify({"status": "ok"}), 201
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -792,7 +857,9 @@ def verify_voucher(code):
             voucher = cursor.fetchone()
             if not voucher:
                 return jsonify({"status": "invalid"}), 404
-            return jsonify(one_to_json(voucher))
+            voucher_json = one_to_json(voucher)
+            mirror_safe("voucher_verifications", {**voucher_json, "verification_status": "valid"}, ["code"])
+            return jsonify(voucher_json)
 
 
 @mvp_api.route("/vouchers/<code>/redeem", methods=["POST"])
@@ -807,4 +874,5 @@ def redeem_voucher(code):
         connection.commit()
     if not updated:
         return jsonify({"status": "not_redeemed"}), 409
+    mirror_safe("vouchers", {"code": code, "status": "used", "redeemed_at": datetime.utcnow()}, ["code"])
     return jsonify({"status": "used"})

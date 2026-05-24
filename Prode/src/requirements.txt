@@ -6,3 +6,5 @@ python-dotenv
 cryptography
 bcrypt
 gunicorn
+boto3
+pymongo
