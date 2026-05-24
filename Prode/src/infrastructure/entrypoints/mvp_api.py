@@ -1,5 +1,7 @@
 from datetime import datetime
+import uuid
 
+import bcrypt
 from flask import Blueprint, jsonify, request, send_file
 
 from infrastructure.db_conn.mysql_config import get_connection
@@ -30,6 +32,15 @@ def mirror_safe(collection, document, key_fields=None):
         mirror_document(collection, document, key_fields)
     except Exception:
         pass
+
+
+def public_account(account):
+    account = one_to_json(account)
+    if not account:
+        return None
+    account.pop("password_hash", None)
+    token = f"demo-{account['role']}-{account['id']}-{uuid.uuid4().hex[:10]}"
+    return {**account, "token": token}
 
 
 def ensure_schema():
@@ -86,9 +97,14 @@ def ensure_schema():
         CREATE TABLE IF NOT EXISTS gp_merchants (
             id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
             name VARCHAR(180) NOT NULL,
+            city VARCHAR(120),
             zone VARCHAR(180),
             address TEXT,
             link VARCHAR(500),
+            instagram_url VARCHAR(500),
+            facebook_url VARCHAR(500),
+            tiktok_url VARCHAR(500),
+            whatsapp_url VARCHAR(500),
             image_url VARCHAR(500),
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -101,6 +117,7 @@ def ensure_schema():
             prize TEXT NOT NULL,
             rule ENUM('participate','winner','exact','goal_diff','home_goals','away_goals','first_half_goals') NOT NULL,
             quantity INT NOT NULL DEFAULT 0,
+            city VARCHAR(120),
             expires_at VARCHAR(80),
             image_url VARCHAR(500),
             active TINYINT(1) DEFAULT 1,
@@ -115,7 +132,13 @@ def ensure_schema():
             title VARCHAR(180) NOT NULL,
             description TEXT NOT NULL,
             image_url VARCHAR(500),
+            city VARCHAR(120),
+            address TEXT,
             link VARCHAR(500),
+            instagram_url VARCHAR(500),
+            facebook_url VARCHAR(500),
+            tiktok_url VARCHAR(500),
+            whatsapp_url VARCHAR(500),
             expires_at VARCHAR(80),
             active TINYINT(1) DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -141,6 +164,38 @@ def ensure_schema():
             FOREIGN KEY (reward_id) REFERENCES gp_merchant_rewards(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
+        """
+        CREATE TABLE IF NOT EXISTS gp_accounts (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            role ENUM('fan','merchant','admin') NOT NULL,
+            name VARCHAR(180) NOT NULL,
+            email VARCHAR(180) NOT NULL UNIQUE,
+            password_hash VARCHAR(120) NOT NULL,
+            city VARCHAR(120),
+            merchant_id BIGINT UNSIGNED NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (merchant_id) REFERENCES gp_merchants(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS gp_outreach_leads (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            city VARCHAR(120) NOT NULL,
+            source_app VARCHAR(120),
+            business_name VARCHAR(180) NOT NULL,
+            category VARCHAR(120),
+            contact_name VARCHAR(160),
+            contact_channel ENUM('whatsapp','email','instagram','facebook','tiktok','manual') DEFAULT 'manual',
+            contact_value VARCHAR(500),
+            invite_token VARCHAR(80) NOT NULL UNIQUE,
+            invite_url VARCHAR(700),
+            status ENUM('new','invited','opened','registered','declined') DEFAULT 'new',
+            notes TEXT,
+            sent_at DATETIME NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
     ]
     with get_connection() as connection:
         with connection.cursor() as cursor:
@@ -149,6 +204,18 @@ def ensure_schema():
             for statement in [
                 "ALTER TABLE gp_matches ADD COLUMN kickoff_utc VARCHAR(40) NULL AFTER match_date",
                 "ALTER TABLE gp_matches ADD COLUMN match_timezone VARCHAR(80) NULL AFTER kickoff_utc",
+                "ALTER TABLE gp_merchants ADD COLUMN city VARCHAR(120) NULL AFTER name",
+                "ALTER TABLE gp_merchants ADD COLUMN instagram_url VARCHAR(500) NULL AFTER link",
+                "ALTER TABLE gp_merchants ADD COLUMN facebook_url VARCHAR(500) NULL AFTER instagram_url",
+                "ALTER TABLE gp_merchants ADD COLUMN tiktok_url VARCHAR(500) NULL AFTER facebook_url",
+                "ALTER TABLE gp_merchants ADD COLUMN whatsapp_url VARCHAR(500) NULL AFTER tiktok_url",
+                "ALTER TABLE gp_merchant_rewards ADD COLUMN city VARCHAR(120) NULL AFTER quantity",
+                "ALTER TABLE gp_merchant_promotions ADD COLUMN city VARCHAR(120) NULL AFTER image_url",
+                "ALTER TABLE gp_merchant_promotions ADD COLUMN address TEXT NULL AFTER city",
+                "ALTER TABLE gp_merchant_promotions ADD COLUMN instagram_url VARCHAR(500) NULL AFTER link",
+                "ALTER TABLE gp_merchant_promotions ADD COLUMN facebook_url VARCHAR(500) NULL AFTER instagram_url",
+                "ALTER TABLE gp_merchant_promotions ADD COLUMN tiktok_url VARCHAR(500) NULL AFTER facebook_url",
+                "ALTER TABLE gp_merchant_promotions ADD COLUMN whatsapp_url VARCHAR(500) NULL AFTER tiktok_url",
             ]:
                 try:
                     cursor.execute(statement)
@@ -618,6 +685,179 @@ def create_fan():
     return jsonify(one_to_json(fan)), 201
 
 
+@mvp_api.route("/auth/register", methods=["POST"])
+def auth_register():
+    payload = request.get_json(force=True) or {}
+    role = payload.get("role") or "fan"
+    if role not in {"fan", "merchant", "admin"}:
+        return jsonify({"error": "invalid role"}), 400
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    if not email or len(password) < 6:
+        return jsonify({"error": "email and password with 6+ chars are required"}), 400
+
+    password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            merchant_id = payload.get("merchant_id")
+            if role == "merchant" and not merchant_id and payload.get("merchant_name"):
+                cursor.execute(
+                    """
+                    INSERT INTO gp_merchants
+                    (name, city, zone, address, link, instagram_url, facebook_url, tiktok_url, whatsapp_url, image_url)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        payload.get("merchant_name"),
+                        payload.get("city"),
+                        payload.get("zone"),
+                        payload.get("address"),
+                        payload.get("link"),
+                        payload.get("instagram_url"),
+                        payload.get("facebook_url"),
+                        payload.get("tiktok_url"),
+                        payload.get("whatsapp_url"),
+                        payload.get("image_url"),
+                    ),
+                )
+                merchant_id = cursor.lastrowid
+            cursor.execute(
+                """
+                INSERT INTO gp_accounts (role, name, email, password_hash, city, merchant_id)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                """,
+                (role, payload.get("name") or email, email, password_hash, payload.get("city"), merchant_id),
+            )
+            account_id = cursor.lastrowid
+            cursor.execute("SELECT * FROM gp_accounts WHERE id=%s", (account_id,))
+            account = cursor.fetchone()
+        connection.commit()
+    mirror_safe("accounts", public_account(account), ["id"])
+    return jsonify(public_account(account)), 201
+
+
+@mvp_api.route("/auth/login", methods=["POST"])
+def auth_login():
+    payload = request.get_json(force=True) or {}
+    email = (payload.get("email") or "").strip().lower()
+    password = payload.get("password") or ""
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM gp_accounts WHERE email=%s", (email,))
+            account = cursor.fetchone()
+    if not account or not bcrypt.checkpw(password.encode("utf-8"), account["password_hash"].encode("utf-8")):
+        return jsonify({"error": "invalid credentials"}), 401
+    return jsonify(public_account(account))
+
+
+@mvp_api.route("/outreach/leads", methods=["GET", "POST"])
+def outreach_leads():
+    if request.method == "POST":
+        payload = request.get_json(force=True) or {}
+        token = uuid.uuid4().hex[:16]
+        frontend_url = (payload.get("frontend_url") or "https://betmundial.vercel.app").rstrip("/")
+        invite_url = f"{frontend_url}/?invite={token}&role=merchant"
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO gp_outreach_leads
+                    (city, source_app, business_name, category, contact_name, contact_channel, contact_value, invite_token, invite_url, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        payload.get("city") or "Global",
+                        payload.get("source_app"),
+                        payload.get("business_name") or "Local aliado",
+                        payload.get("category"),
+                        payload.get("contact_name"),
+                        payload.get("contact_channel") or "manual",
+                        payload.get("contact_value"),
+                        token,
+                        invite_url,
+                        payload.get("notes"),
+                    ),
+                )
+                lead_id = cursor.lastrowid
+                cursor.execute("SELECT * FROM gp_outreach_leads WHERE id=%s", (lead_id,))
+                lead = cursor.fetchone()
+            connection.commit()
+        mirror_safe("outreach_leads", one_to_json(lead), ["id"])
+        return jsonify(one_to_json(lead)), 201
+
+    city = request.args.get("city")
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            if city:
+                cursor.execute(
+                    "SELECT * FROM gp_outreach_leads WHERE city LIKE %s ORDER BY id DESC LIMIT 200",
+                    (f"%{city}%",),
+                )
+            else:
+                cursor.execute("SELECT * FROM gp_outreach_leads ORDER BY id DESC LIMIT 200")
+            return jsonify(rows_to_json(cursor.fetchall()))
+
+
+@mvp_api.route("/outreach/leads/bulk", methods=["POST"])
+def outreach_leads_bulk():
+    payload = request.get_json(force=True) or {}
+    leads = payload.get("leads") or []
+    frontend_url = (payload.get("frontend_url") or "https://betmundial.vercel.app").rstrip("/")
+    created = []
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            for lead in leads[:200]:
+                token = uuid.uuid4().hex[:16]
+                invite_url = f"{frontend_url}/?invite={token}&role=merchant"
+                cursor.execute(
+                    """
+                    INSERT INTO gp_outreach_leads
+                    (city, source_app, business_name, category, contact_name, contact_channel, contact_value, invite_token, invite_url, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        lead.get("city") or payload.get("city") or "Global",
+                        lead.get("source_app") or payload.get("source_app") or "Google Maps",
+                        lead.get("business_name") or "Local aliado",
+                        lead.get("category"),
+                        lead.get("contact_name"),
+                        lead.get("contact_channel") or "manual",
+                        lead.get("contact_value"),
+                        token,
+                        invite_url,
+                        lead.get("notes"),
+                    ),
+                )
+                created.append(cursor.lastrowid)
+            if created:
+                placeholders = ",".join(["%s"] * len(created))
+                cursor.execute(f"SELECT * FROM gp_outreach_leads WHERE id IN ({placeholders}) ORDER BY id DESC", created)
+                rows = cursor.fetchall()
+            else:
+                rows = []
+        connection.commit()
+    for row in rows:
+        mirror_safe("outreach_leads", one_to_json(row), ["id"])
+    return jsonify(rows_to_json(rows)), 201
+
+
+@mvp_api.route("/outreach/leads/<int:lead_id>/sent", methods=["POST"])
+def mark_outreach_sent(lead_id):
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE gp_outreach_leads SET status='invited', sent_at=NOW() WHERE id=%s",
+                (lead_id,),
+            )
+            cursor.execute("SELECT * FROM gp_outreach_leads WHERE id=%s", (lead_id,))
+            lead = cursor.fetchone()
+        connection.commit()
+    if not lead:
+        return jsonify({"error": "lead not found"}), 404
+    mirror_safe("outreach_leads", one_to_json(lead), ["id"])
+    return jsonify(one_to_json(lead))
+
+
 @mvp_api.route("/fans", methods=["GET"])
 def list_fans():
     device_id = request.args.get("device_id")
@@ -734,8 +974,23 @@ def merchants():
         with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "INSERT INTO gp_merchants (name, zone, address, link, image_url) VALUES (%s,%s,%s,%s,%s)",
-                    (payload.get("name"), payload.get("zone"), payload.get("address"), payload.get("link"), payload.get("image_url")),
+                    """
+                    INSERT INTO gp_merchants
+                    (name, city, zone, address, link, instagram_url, facebook_url, tiktok_url, whatsapp_url, image_url)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        payload.get("name"),
+                        payload.get("city"),
+                        payload.get("zone"),
+                        payload.get("address"),
+                        payload.get("link"),
+                        payload.get("instagram_url"),
+                        payload.get("facebook_url"),
+                        payload.get("tiktok_url"),
+                        payload.get("whatsapp_url"),
+                        payload.get("image_url"),
+                    ),
                 )
                 merchant_id = cursor.lastrowid
                 cursor.execute("SELECT * FROM gp_merchants WHERE id=%s", (merchant_id,))
@@ -758,8 +1013,8 @@ def merchant_rewards():
                 cursor.execute(
                     """
                     INSERT INTO gp_merchant_rewards
-                    (merchant_id, title, prize, rule, quantity, expires_at, image_url)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    (merchant_id, title, prize, rule, quantity, city, expires_at, image_url)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         payload["merchant_id"],
@@ -767,6 +1022,7 @@ def merchant_rewards():
                         payload.get("prize"),
                         payload.get("rule"),
                         payload.get("quantity") or 0,
+                        payload.get("city"),
                         payload.get("expires_at"),
                         payload.get("image_url"),
                     ),
@@ -774,7 +1030,9 @@ def merchant_rewards():
                 reward_id = cursor.lastrowid
                 cursor.execute(
                     """
-                    SELECT r.*, m.name AS merchant_name, m.zone, m.link
+                    SELECT r.*, COALESCE(r.city, m.city) AS campaign_city,
+                           m.name AS merchant_name, m.city AS merchant_city, m.zone, m.link,
+                           m.instagram_url, m.facebook_url, m.tiktok_url, m.whatsapp_url, m.address
                     FROM gp_merchant_rewards r
                     JOIN gp_merchants m ON m.id = r.merchant_id
                     WHERE r.id=%s
@@ -789,7 +1047,9 @@ def merchant_rewards():
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT r.*, m.name AS merchant_name, m.zone, m.link
+                SELECT r.*, COALESCE(r.city, m.city) AS campaign_city,
+                       m.name AS merchant_name, m.city AS merchant_city, m.zone, m.link,
+                       m.instagram_url, m.facebook_url, m.tiktok_url, m.whatsapp_url, m.address
                 FROM gp_merchant_rewards r
                 JOIN gp_merchants m ON m.id = r.merchant_id
                 ORDER BY r.id DESC
@@ -807,22 +1067,34 @@ def merchant_promotions():
                 cursor.execute(
                     """
                     INSERT INTO gp_merchant_promotions
-                    (merchant_id, title, description, image_url, link, expires_at)
-                    VALUES (%s,%s,%s,%s,%s,%s)
+                    (merchant_id, title, description, image_url, city, address, link, instagram_url, facebook_url, tiktok_url, whatsapp_url, expires_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         payload["merchant_id"],
                         payload.get("title"),
                         payload.get("description"),
                         payload.get("image_url"),
+                        payload.get("city"),
+                        payload.get("address"),
                         payload.get("link"),
+                        payload.get("instagram_url"),
+                        payload.get("facebook_url"),
+                        payload.get("tiktok_url"),
+                        payload.get("whatsapp_url"),
                         payload.get("expires_at"),
                     ),
                 )
                 promotion_id = cursor.lastrowid
                 cursor.execute(
                     """
-                    SELECT p.*, m.name AS merchant_name, m.zone
+                    SELECT p.*, COALESCE(p.city, m.city) AS campaign_city,
+                           COALESCE(p.address, m.address) AS campaign_address,
+                           m.name AS merchant_name, m.city AS merchant_city, m.zone,
+                           COALESCE(p.instagram_url, m.instagram_url) AS campaign_instagram_url,
+                           COALESCE(p.facebook_url, m.facebook_url) AS campaign_facebook_url,
+                           COALESCE(p.tiktok_url, m.tiktok_url) AS campaign_tiktok_url,
+                           COALESCE(p.whatsapp_url, m.whatsapp_url) AS campaign_whatsapp_url
                     FROM gp_merchant_promotions p
                     JOIN gp_merchants m ON m.id = p.merchant_id
                     WHERE p.id=%s
@@ -837,7 +1109,13 @@ def merchant_promotions():
         with connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT p.*, m.name AS merchant_name, m.zone
+                SELECT p.*, COALESCE(p.city, m.city) AS campaign_city,
+                       COALESCE(p.address, m.address) AS campaign_address,
+                       m.name AS merchant_name, m.city AS merchant_city, m.zone,
+                       COALESCE(p.instagram_url, m.instagram_url) AS campaign_instagram_url,
+                       COALESCE(p.facebook_url, m.facebook_url) AS campaign_facebook_url,
+                       COALESCE(p.tiktok_url, m.tiktok_url) AS campaign_tiktok_url,
+                       COALESCE(p.whatsapp_url, m.whatsapp_url) AS campaign_whatsapp_url
                 FROM gp_merchant_promotions p
                 JOIN gp_merchants m ON m.id = p.merchant_id
                 WHERE p.active=1
