@@ -39,8 +39,25 @@ def public_account(account):
     if not account:
         return None
     account.pop("password_hash", None)
+    role_access = {
+        "fan": {
+            "access_path": "/fan",
+            "label": "Fan app",
+            "permissions": ["fixture:read", "prediction:create", "voucher:read", "promotion:read"],
+        },
+        "merchant": {
+            "access_path": "/merchant",
+            "label": "Business console",
+            "permissions": ["voucher:verify", "reward:create_pending", "promotion:create_pending"],
+        },
+        "admin": {
+            "access_path": "/admin",
+            "label": "Admin console",
+            "permissions": ["campaign:review", "result:publish", "outreach:manage", "promotion:publish"],
+        },
+    }
     token = f"demo-{account['role']}-{account['id']}-{uuid.uuid4().hex[:10]}"
-    return {**account, "token": token}
+    return {**account, **role_access.get(account["role"], {}), "token": token}
 
 
 def ensure_schema():
@@ -175,8 +192,20 @@ def ensure_schema():
             password_hash VARCHAR(120) NOT NULL,
             city VARCHAR(120),
             merchant_id BIGINT UNSIGNED NULL,
+            account_status VARCHAR(40) DEFAULT 'active',
+            last_login_at DATETIME NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (merchant_id) REFERENCES gp_merchants(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS gp_role_access (
+            role_name VARCHAR(40) PRIMARY KEY,
+            label VARCHAR(120) NOT NULL,
+            access_path VARCHAR(120) NOT NULL,
+            permissions TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """,
         """
@@ -220,6 +249,8 @@ def ensure_schema():
                 "ALTER TABLE gp_merchant_promotions ADD COLUMN whatsapp_url VARCHAR(500) NULL AFTER tiktok_url",
                 "ALTER TABLE gp_merchant_rewards ADD COLUMN review_status VARCHAR(40) DEFAULT 'approved' AFTER active",
                 "ALTER TABLE gp_merchant_promotions ADD COLUMN review_status VARCHAR(40) DEFAULT 'approved' AFTER active",
+                "ALTER TABLE gp_accounts ADD COLUMN account_status VARCHAR(40) DEFAULT 'active' AFTER merchant_id",
+                "ALTER TABLE gp_accounts ADD COLUMN last_login_at DATETIME NULL AFTER account_status",
             ]:
                 try:
                     cursor.execute(statement)
@@ -228,6 +259,18 @@ def ensure_schema():
                         raise
             cursor.execute("UPDATE gp_merchant_rewards SET review_status='approved', active=1 WHERE review_status IS NULL")
             cursor.execute("UPDATE gp_merchant_promotions SET review_status='approved', active=1 WHERE review_status IS NULL")
+            cursor.executemany(
+                """
+                INSERT INTO gp_role_access (role_name, label, access_path, permissions)
+                VALUES (%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE label=VALUES(label), access_path=VALUES(access_path), permissions=VALUES(permissions)
+                """,
+                [
+                    ("fan", "Fan app", "/fan", "fixture:read,prediction:create,voucher:read,promotion:read"),
+                    ("merchant", "Business console", "/merchant", "voucher:verify,reward:create_pending,promotion:create_pending"),
+                    ("admin", "Admin console", "/admin", "campaign:review,result:publish,outreach:manage,promotion:publish"),
+                ],
+            )
             cursor.execute("SELECT COUNT(*) AS total FROM gp_matches")
             if cursor.fetchone()["total"] == 0:
                 cursor.execute(
@@ -705,6 +748,9 @@ def auth_register():
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     with get_connection() as connection:
         with connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM gp_accounts WHERE email=%s", (email,))
+            if cursor.fetchone():
+                return jsonify({"error": "account already exists", "next": "login"}), 409
             merchant_id = payload.get("merchant_id")
             if role == "merchant" and not merchant_id and payload.get("merchant_name"):
                 cursor.execute(
@@ -729,8 +775,8 @@ def auth_register():
                 merchant_id = cursor.lastrowid
             cursor.execute(
                 """
-                INSERT INTO gp_accounts (role, name, email, password_hash, city, merchant_id)
-                VALUES (%s,%s,%s,%s,%s,%s)
+                INSERT INTO gp_accounts (role, name, email, password_hash, city, merchant_id, account_status)
+                VALUES (%s,%s,%s,%s,%s,%s,'active')
                 """,
                 (role, payload.get("name") or email, email, password_hash, payload.get("city"), merchant_id),
             )
@@ -753,7 +799,21 @@ def auth_login():
             account = cursor.fetchone()
     if not account or not bcrypt.checkpw(password.encode("utf-8"), account["password_hash"].encode("utf-8")):
         return jsonify({"error": "invalid credentials"}), 401
+    if account.get("account_status") and account["account_status"] != "active":
+        return jsonify({"error": "account inactive"}), 403
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE gp_accounts SET last_login_at=NOW() WHERE id=%s", (account["id"],))
+        connection.commit()
     return jsonify(public_account(account))
+
+
+@mvp_api.route("/auth/roles", methods=["GET"])
+def auth_roles():
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM gp_role_access ORDER BY FIELD(role_name, 'fan', 'merchant', 'admin')")
+            return jsonify(rows_to_json(cursor.fetchall()))
 
 
 @mvp_api.route("/outreach/leads", methods=["GET", "POST"])
