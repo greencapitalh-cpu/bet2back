@@ -887,6 +887,19 @@ def auth_roles():
             return jsonify(rows_to_json(cursor.fetchall()))
 
 
+@mvp_api.route("/auth/oauth/status", methods=["GET"])
+def oauth_status():
+    return jsonify(
+        {
+            "google": bool(os.getenv("GOOGLE_OAUTH_CLIENT_ID") and os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")),
+            "facebook": bool(
+                (os.getenv("FACEBOOK_OAUTH_CLIENT_ID") or os.getenv("FACEBOOK_APP_ID"))
+                and (os.getenv("FACEBOOK_OAUTH_CLIENT_SECRET") or os.getenv("FACEBOOK_APP_SECRET"))
+            ),
+        }
+    )
+
+
 @mvp_api.route("/auth/oauth/<provider>/start", methods=["GET"])
 def oauth_start(provider):
     provider = provider.lower()
