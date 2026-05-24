@@ -121,6 +121,7 @@ def ensure_schema():
             expires_at VARCHAR(80),
             image_url VARCHAR(500),
             active TINYINT(1) DEFAULT 1,
+            review_status VARCHAR(40) DEFAULT 'approved',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (merchant_id) REFERENCES gp_merchants(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -141,6 +142,7 @@ def ensure_schema():
             whatsapp_url VARCHAR(500),
             expires_at VARCHAR(80),
             active TINYINT(1) DEFAULT 1,
+            review_status VARCHAR(40) DEFAULT 'approved',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (merchant_id) REFERENCES gp_merchants(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -216,12 +218,16 @@ def ensure_schema():
                 "ALTER TABLE gp_merchant_promotions ADD COLUMN facebook_url VARCHAR(500) NULL AFTER instagram_url",
                 "ALTER TABLE gp_merchant_promotions ADD COLUMN tiktok_url VARCHAR(500) NULL AFTER facebook_url",
                 "ALTER TABLE gp_merchant_promotions ADD COLUMN whatsapp_url VARCHAR(500) NULL AFTER tiktok_url",
+                "ALTER TABLE gp_merchant_rewards ADD COLUMN review_status VARCHAR(40) DEFAULT 'approved' AFTER active",
+                "ALTER TABLE gp_merchant_promotions ADD COLUMN review_status VARCHAR(40) DEFAULT 'approved' AFTER active",
             ]:
                 try:
                     cursor.execute(statement)
                 except Exception as exc:
                     if "Duplicate column" not in str(exc):
                         raise
+            cursor.execute("UPDATE gp_merchant_rewards SET review_status='approved', active=1 WHERE review_status IS NULL")
+            cursor.execute("UPDATE gp_merchant_promotions SET review_status='approved', active=1 WHERE review_status IS NULL")
             cursor.execute("SELECT COUNT(*) AS total FROM gp_matches")
             if cursor.fetchone()["total"] == 0:
                 cursor.execute(
@@ -571,7 +577,7 @@ def issue_vouchers(connection, match_id=None, prediction_id=None):
             params,
         )
         predictions = cursor.fetchall()
-        cursor.execute("SELECT * FROM gp_merchant_rewards WHERE active = 1")
+        cursor.execute("SELECT * FROM gp_merchant_rewards WHERE active = 1 AND review_status = 'approved'")
         rewards = cursor.fetchall()
         for prediction in predictions:
             cursor.execute("SELECT * FROM gp_matches WHERE id = %s", (prediction["match_id"],))
@@ -1008,13 +1014,17 @@ def merchants():
 def merchant_rewards():
     if request.method == "POST":
         payload = request.get_json(force=True) or {}
+        review_status = payload.get("review_status") or "pending_review"
+        if review_status not in {"pending_review", "approved", "rejected", "paused"}:
+            return jsonify({"error": "invalid review status"}), 400
+        active = 1 if review_status == "approved" else 0
         with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     INSERT INTO gp_merchant_rewards
-                    (merchant_id, title, prize, rule, quantity, city, expires_at, image_url)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    (merchant_id, title, prize, rule, quantity, city, expires_at, image_url, active, review_status)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         payload["merchant_id"],
@@ -1025,6 +1035,8 @@ def merchant_rewards():
                         payload.get("city"),
                         payload.get("expires_at"),
                         payload.get("image_url"),
+                        active,
+                        review_status,
                     ),
                 )
                 reward_id = cursor.lastrowid
@@ -1042,16 +1054,19 @@ def merchant_rewards():
                 reward = cursor.fetchone()
             connection.commit()
         mirror_safe("merchant_rewards", one_to_json(reward), ["id"])
-        return jsonify({"status": "ok"}), 201
+        return jsonify(one_to_json(reward)), 201
+    include_all = request.args.get("include_all") in {"1", "true", "yes"}
     with get_connection() as connection:
         with connection.cursor() as cursor:
+            status_clause = "" if include_all else "WHERE r.active=1 AND r.review_status='approved'"
             cursor.execute(
-                """
+                f"""
                 SELECT r.*, COALESCE(r.city, m.city) AS campaign_city,
                        m.name AS merchant_name, m.city AS merchant_city, m.zone, m.link,
                        m.instagram_url, m.facebook_url, m.tiktok_url, m.whatsapp_url, m.address
                 FROM gp_merchant_rewards r
                 JOIN gp_merchants m ON m.id = r.merchant_id
+                {status_clause}
                 ORDER BY r.id DESC
                 """
             )
@@ -1062,13 +1077,17 @@ def merchant_rewards():
 def merchant_promotions():
     if request.method == "POST":
         payload = request.get_json(force=True) or {}
+        review_status = payload.get("review_status") or "pending_review"
+        if review_status not in {"pending_review", "approved", "rejected", "paused"}:
+            return jsonify({"error": "invalid review status"}), 400
+        active = 1 if review_status == "approved" else 0
         with get_connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
                     INSERT INTO gp_merchant_promotions
-                    (merchant_id, title, description, image_url, city, address, link, instagram_url, facebook_url, tiktok_url, whatsapp_url, expires_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    (merchant_id, title, description, image_url, city, address, link, instagram_url, facebook_url, tiktok_url, whatsapp_url, expires_at, active, review_status)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         payload["merchant_id"],
@@ -1083,6 +1102,8 @@ def merchant_promotions():
                         payload.get("tiktok_url"),
                         payload.get("whatsapp_url"),
                         payload.get("expires_at"),
+                        active,
+                        review_status,
                     ),
                 )
                 promotion_id = cursor.lastrowid
@@ -1104,11 +1125,13 @@ def merchant_promotions():
                 promotion = cursor.fetchone()
             connection.commit()
         mirror_safe("merchant_promotions", one_to_json(promotion), ["id"])
-        return jsonify({"status": "ok"}), 201
+        return jsonify(one_to_json(promotion)), 201
+    include_all = request.args.get("include_all") in {"1", "true", "yes"}
     with get_connection() as connection:
         with connection.cursor() as cursor:
+            status_clause = "" if include_all else "WHERE p.active=1 AND p.review_status='approved'"
             cursor.execute(
-                """
+                f"""
                 SELECT p.*, COALESCE(p.city, m.city) AS campaign_city,
                        COALESCE(p.address, m.address) AS campaign_address,
                        m.name AS merchant_name, m.city AS merchant_city, m.zone,
@@ -1118,11 +1141,42 @@ def merchant_promotions():
                        COALESCE(p.whatsapp_url, m.whatsapp_url) AS campaign_whatsapp_url
                 FROM gp_merchant_promotions p
                 JOIN gp_merchants m ON m.id = p.merchant_id
-                WHERE p.active=1
+                {status_clause}
                 ORDER BY p.id DESC
                 """
             )
             return jsonify(rows_to_json(cursor.fetchall()))
+
+
+def review_campaign(table, campaign_id, collection):
+    payload = request.get_json(force=True) or {}
+    review_status = payload.get("review_status") or payload.get("status")
+    if review_status not in {"pending_review", "approved", "rejected", "paused"}:
+        return jsonify({"error": "invalid review status"}), 400
+    active = 1 if review_status == "approved" else 0
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"UPDATE {table} SET review_status=%s, active=%s WHERE id=%s",
+                (review_status, active, campaign_id),
+            )
+            cursor.execute(f"SELECT * FROM {table} WHERE id=%s", (campaign_id,))
+            campaign = cursor.fetchone()
+        connection.commit()
+    if not campaign:
+        return jsonify({"error": "campaign not found"}), 404
+    mirror_safe(collection, one_to_json(campaign), ["id"])
+    return jsonify(one_to_json(campaign))
+
+
+@mvp_api.route("/merchant-rewards/<int:reward_id>/review", methods=["POST"])
+def review_merchant_reward(reward_id):
+    return review_campaign("gp_merchant_rewards", reward_id, "merchant_rewards")
+
+
+@mvp_api.route("/merchant-promotions/<int:promotion_id>/review", methods=["POST"])
+def review_merchant_promotion(promotion_id):
+    return review_campaign("gp_merchant_promotions", promotion_id, "merchant_promotions")
 
 
 @mvp_api.route("/vouchers/<code>", methods=["GET"])
