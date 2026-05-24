@@ -1,8 +1,12 @@
 from datetime import datetime
+import json
+import os
 import uuid
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 import bcrypt
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, jsonify, redirect, request, send_file
 
 from infrastructure.db_conn.mysql_config import get_connection
 from infrastructure.db_conn.mongo_config import mirror_document
@@ -11,6 +15,9 @@ from infrastructure.storage.r2_storage import read_image, upload_image
 
 
 mvp_api = Blueprint("mvp_api", __name__, url_prefix="/api")
+
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://betmundial.vercel.app").rstrip("/")
 
 
 def rows_to_json(rows):
@@ -58,6 +65,55 @@ def public_account(account):
     }
     token = f"demo-{account['role']}-{account['id']}-{uuid.uuid4().hex[:10]}"
     return {**account, **role_access.get(account["role"], {}), "token": token}
+
+
+def api_post_json(url, payload, headers=None):
+    data = urlencode(payload).encode("utf-8")
+    req = Request(url, data=data, headers=headers or {})
+    with urlopen(req, timeout=12) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def api_get_json(url, token=None):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=12) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def oauth_callback_html(account):
+    payload = json.dumps(public_account(account))
+    return f"""
+    <!doctype html>
+    <html><body>
+      <script>
+        localStorage.setItem('golazo-account', JSON.stringify({payload}));
+        window.location.replace('{FRONTEND_URL}/fan?oauth=success');
+      </script>
+    </body></html>
+    """
+
+
+def find_or_create_oauth_fan(email, name):
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM gp_accounts WHERE email=%s", (email,))
+            account = cursor.fetchone()
+            if not account:
+                password_hash = bcrypt.hashpw(uuid.uuid4().hex.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                cursor.execute(
+                    """
+                    INSERT INTO gp_accounts (role, name, email, password_hash, city, account_status)
+                    VALUES ('fan',%s,%s,%s,%s,'active')
+                    """,
+                    (name or email, email, password_hash, ""),
+                )
+                cursor.execute("SELECT * FROM gp_accounts WHERE id=%s", (cursor.lastrowid,))
+                account = cursor.fetchone()
+            else:
+                cursor.execute("UPDATE gp_accounts SET last_login_at=NOW() WHERE id=%s", (account["id"],))
+        connection.commit()
+    return account
 
 
 def ensure_schema():
@@ -814,6 +870,92 @@ def auth_roles():
         with connection.cursor() as cursor:
             cursor.execute("SELECT * FROM gp_role_access ORDER BY FIELD(role_name, 'fan', 'merchant', 'admin')")
             return jsonify(rows_to_json(cursor.fetchall()))
+
+
+@mvp_api.route("/auth/oauth/<provider>/start", methods=["GET"])
+def oauth_start(provider):
+    provider = provider.lower()
+    if provider == "google":
+        client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+        redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI") or f"{request.url_root.rstrip('/')}/api/auth/oauth/google/callback"
+        if not client_id:
+            return redirect(f"{FRONTEND_URL}/fan?auth_error=google_oauth_not_configured")
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "openid email profile",
+            "access_type": "offline",
+            "prompt": "select_account",
+            "state": uuid.uuid4().hex,
+        }
+        return redirect(f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}")
+    if provider == "facebook":
+        client_id = os.getenv("FACEBOOK_OAUTH_CLIENT_ID") or os.getenv("FACEBOOK_APP_ID")
+        redirect_uri = os.getenv("FACEBOOK_OAUTH_REDIRECT_URI") or f"{request.url_root.rstrip('/')}/api/auth/oauth/facebook/callback"
+        if not client_id:
+            return redirect(f"{FRONTEND_URL}/fan?auth_error=facebook_oauth_not_configured")
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "email,public_profile",
+            "state": uuid.uuid4().hex,
+        }
+        return redirect(f"https://www.facebook.com/v20.0/dialog/oauth?{urlencode(params)}")
+    return jsonify({"error": "unsupported oauth provider"}), 404
+
+
+@mvp_api.route("/auth/oauth/google/callback", methods=["GET"])
+def google_oauth_callback():
+    code = request.args.get("code")
+    if not code:
+        return redirect(f"{FRONTEND_URL}/fan?auth_error=google_no_code")
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI") or f"{request.url_root.rstrip('/')}/api/auth/oauth/google/callback"
+    try:
+        token = api_post_json(
+            "https://oauth2.googleapis.com/token",
+            {
+                "code": code,
+                "client_id": os.getenv("GOOGLE_OAUTH_CLIENT_ID"),
+                "client_secret": os.getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            },
+            {"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        profile = api_get_json("https://openidconnect.googleapis.com/v1/userinfo", token.get("access_token"))
+        email = (profile.get("email") or "").strip().lower()
+        if not email:
+            return redirect(f"{FRONTEND_URL}/fan?auth_error=google_email_missing")
+        account = find_or_create_oauth_fan(email, profile.get("name") or email)
+        return oauth_callback_html(account)
+    except Exception:
+        return redirect(f"{FRONTEND_URL}/fan?auth_error=google_oauth_failed")
+
+
+@mvp_api.route("/auth/oauth/facebook/callback", methods=["GET"])
+def facebook_oauth_callback():
+    code = request.args.get("code")
+    if not code:
+        return redirect(f"{FRONTEND_URL}/fan?auth_error=facebook_no_code")
+    redirect_uri = os.getenv("FACEBOOK_OAUTH_REDIRECT_URI") or f"{request.url_root.rstrip('/')}/api/auth/oauth/facebook/callback"
+    client_id = os.getenv("FACEBOOK_OAUTH_CLIENT_ID") or os.getenv("FACEBOOK_APP_ID")
+    client_secret = os.getenv("FACEBOOK_OAUTH_CLIENT_SECRET") or os.getenv("FACEBOOK_APP_SECRET")
+    try:
+        token = api_get_json(
+            f"https://graph.facebook.com/v20.0/oauth/access_token?{urlencode({'client_id': client_id, 'client_secret': client_secret, 'redirect_uri': redirect_uri, 'code': code})}"
+        )
+        profile = api_get_json(
+            f"https://graph.facebook.com/me?{urlencode({'fields': 'id,name,email', 'access_token': token.get('access_token')})}"
+        )
+        email = (profile.get("email") or "").strip().lower()
+        if not email:
+            return redirect(f"{FRONTEND_URL}/fan?auth_error=facebook_email_missing")
+        account = find_or_create_oauth_fan(email, profile.get("name") or email)
+        return oauth_callback_html(account)
+    except Exception:
+        return redirect(f"{FRONTEND_URL}/fan?auth_error=facebook_oauth_failed")
 
 
 @mvp_api.route("/outreach/leads", methods=["GET", "POST"])
