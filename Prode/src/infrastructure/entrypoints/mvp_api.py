@@ -920,7 +920,6 @@ def oauth_start(provider):
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": "public_profile",
             "state": uuid.uuid4().hex,
         }
         return redirect(f"https://www.facebook.com/v20.0/dialog/oauth?{urlencode(params)}")
