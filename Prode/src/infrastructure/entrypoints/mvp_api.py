@@ -920,7 +920,7 @@ def oauth_start(provider):
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": "email,public_profile",
+            "scope": "public_profile",
             "state": uuid.uuid4().hex,
         }
         return redirect(f"https://www.facebook.com/v20.0/dialog/oauth?{urlencode(params)}")
@@ -968,9 +968,12 @@ def facebook_oauth_callback():
             f"https://graph.facebook.com/v20.0/oauth/access_token?{urlencode({'client_id': client_id, 'client_secret': client_secret, 'redirect_uri': redirect_uri, 'code': code})}"
         )
         profile = api_get_json(
-            f"https://graph.facebook.com/me?{urlencode({'fields': 'id,name,email', 'access_token': token.get('access_token')})}"
+            f"https://graph.facebook.com/me?{urlencode({'fields': 'id,name', 'access_token': token.get('access_token')})}"
         )
+        facebook_id = str(profile.get("id") or "").strip()
         email = (profile.get("email") or "").strip().lower()
+        if not email and facebook_id:
+            email = f"facebook-{facebook_id}@goalpromo.local"
         if not email:
             return redirect(f"{FRONTEND_URL}/fan?auth_error=facebook_email_missing")
         account = find_or_create_oauth_fan(email, profile.get("name") or email)
