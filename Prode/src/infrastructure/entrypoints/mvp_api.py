@@ -83,15 +83,8 @@ def api_get_json(url, token=None):
 
 def oauth_callback_html(account):
     payload = json.dumps(public_account(account))
-    return f"""
-    <!doctype html>
-    <html><body>
-      <script>
-        localStorage.setItem('golazo-account', JSON.stringify({payload}));
-        window.location.replace('{FRONTEND_URL}/fan?oauth=success');
-      </script>
-    </body></html>
-    """
+    params = urlencode({"oauth": "success", "oauth_account": payload})
+    return redirect(f"{FRONTEND_URL}/fan?{params}")
 
 
 def find_or_create_oauth_fan(email, name):
